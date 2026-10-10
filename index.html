@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="icon.png">
+<title>Survivor</title>
+<style>
+  html, body { margin:0; padding:0; background:#111; }
+  /* 舞台 = 海报原始尺寸 1:1（页面可滚动） */
+  #stage { position:relative; width:1172px; height:8808px; margin:0 auto; }
+  #stage img { position:absolute; left:0; top:0; width:1172px; height:8808px; display:block; }
+  #b { opacity:0; }
+
+  /* 播放器窗口 = 1.png / 2.png 的透明矩形：x 294..863, y 81..559 → 570x479 */
+  #player { position:absolute; left:294px; top:81px; width:570px; height:479px;
+            background:#000; overflow:hidden; }
+  #player video { width:100%; height:100%; display:block; object-fit:contain; background:#000; }
+
+  /* 底部控制条：所有功能键都在暂停键边上 */
+  #bar { position:absolute; left:0; right:0; bottom:0; height:40px; box-sizing:border-box;
+         display:flex; align-items:center; gap:8px; padding:0 8px;
+         background:rgba(0,0,0,.72); color:#eee;
+         font:13px/1 "Microsoft YaHei",system-ui,sans-serif; }
+  #bar button { flex:none; width:28px; height:28px; padding:0; border:0; border-radius:4px;
+                background:transparent; color:#eee; font-size:15px; line-height:1; cursor:pointer; }
+  #bar button:hover { background:rgba(255,255,255,.18); }
+  #bar input[type=range] { -webkit-appearance:none; appearance:none; height:4px; border-radius:2px;
+                           background:#555; cursor:pointer; }
+  #bar input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px;
+                           border-radius:50%; background:#eee; }
+  #seek { flex:1 1 auto; min-width:60px; }
+  #vol { flex:none; width:64px; }
+  #time { flex:none; font-variant-numeric:tabular-nums; opacity:.85; }
+
+  /* 播放列表（向上弹出） */
+  #list { position:absolute; left:0; right:0; bottom:40px; max-height:300px; overflow:auto;
+          background:rgba(0,0,0,.92); color:#eee; display:none;
+          font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif; }
+  #list.open { display:block; }
+  #list div { padding:7px 10px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #list div:hover { background:rgba(255,255,255,.14); }
+  #list div.cur { color:#7ff; font-weight:700; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <img id="a" src="1.png" alt="">
+  <img id="b" src="2.png" alt="">
+
+  <div id="player">
+    <video id="v" preload="auto" playsinline></video>
+
+    <div id="list"></div>
+
+    <div id="bar">
+      <button id="pp" title="播放 / 暂停">▶</button>
+      <button id="nx" title="下一个">⏭</button>
+      <button id="mu" title="静音">🔊</button>
+      <input id="vol" type="range" min="0" max="1" step="0.01" value="1" title="音量">
+      <input id="seek" type="range" min="0" max="1000" step="1" value="0" title="进度">
+      <span id="time">0:00 / 0:00</span>
+      <button id="pl" title="播放列表">☰</button>
+    </div>
+  </div>
+</div>
+
+<!-- 视频清单：由同目录的「更新播放列表.bat」扫描 播放列表\ 自动生成，不要手改 -->
+<script src="playlist.js"></script>
+<script>
+/* 增删 / 改名 / 换视频后，双击「更新播放列表.bat」重新生成 playlist.js 即可，本文件不用动。 */
+var DIR    = window.DIR || '播放列表/';
+var TRACKS = (window.TRACKS || []).slice();
+TRACKS.sort();                       /* 字典序，和生成脚本的 Ordinal 排序一致 */
+
+/* ★ 首个播放的视频：填文件名里能唯一识别它的一段文字就行，不用写全名。
+   填了找不到的名字就从头播（第一个视频）。当前 = ヂェっく… */
+var START = "ヂェっく";
+
+function startIndex(name) {
+  name = String(name == null ? '' : name);
+  var i = TRACKS.indexOf(name);                       /* 先按完整文件名匹配 */
+  if (i >= 0) return i;
+  for (var k = 0; k < TRACKS.length; k++) {
+    if (TRACKS[k].indexOf(name) >= 0) return k;       /* 再按片段匹配 */
+  }
+  return 0;
+}
+
+/* ---------- 1.png / 2.png 每 0.2s 硬切 ---------- */
+var A = document.getElementById('a'), B = document.getElementById('b');
+var flip = false;
+setInterval(function () {
+  flip = !flip;
+  A.style.opacity = flip ? 0 : 1;
+  B.style.opacity = flip ? 1 : 0;
+}, 200);
+
+/* ---------- 播放器 ---------- */
+var v    = document.getElementById('v');
+var pp   = document.getElementById('pp');
+var nx   = document.getElementById('nx');
+var mu   = document.getElementById('mu');
+var vol  = document.getElementById('vol');
+var seek = document.getElementById('seek');
+var time = document.getElementById('time');
+var list = document.getElementById('list');
+var idx = startIndex(START);
+
+function fmt(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+function title(f) { return f.replace(/\.mp4$/, ''); }
+
+function renderList() {
+  list.innerHTML = '';
+  if (!TRACKS.length) {
+    var w = document.createElement('div');
+    w.textContent = '没找到视频：请双击 更新播放列表.bat 生成 playlist.js';
+    w.style.cursor = 'default';
+    list.appendChild(w);
+    return;
+  }
+  TRACKS.forEach(function (f, k) {
+    var d = document.createElement('div');
+    d.textContent = title(f);
+    if (k === idx) d.className = 'cur';
+    d.onclick = function () { load(k); list.classList.remove('open'); };
+    list.appendChild(d);
+  });
+}
+
+/* file:// 页面没有 origin，浏览器不记录媒体参与度 → 带声音的自动播放会被拦，需要一次用户“手势”。
+   所以打开后可能先静音播放，点一下页面任意处 / 按任意键就会自动把声音打开。
+   想一打开就有声音：用同目录的「有声音启动.bat」打开本页（给浏览器加了
+   --autoplay-policy=no-user-gesture-required）。 */
+var policyMuted = false;
+function unlock() {
+  if (!policyMuted) return;
+  policyMuted = false;
+  v.muted = false;
+  if (v.volume === 0) v.volume = 1;
+  syncMute();
+  if (v.paused) play();
+}
+document.addEventListener('click', unlock);
+document.addEventListener('keydown', unlock);
+
+function play() {
+  if (!TRACKS.length) return;
+  var p = v.play();
+  if (p && p.catch) {
+    p.catch(function () {                     /* 浏览器拦截带声音的自动播放 */
+      policyMuted = true;
+      v.muted = true;
+      syncMute();
+      v.play().catch(function () {});
+    });
+  }
+}
+
+function load(k) {
+  if (!TRACKS.length) { renderList(); v.removeAttribute('src'); return; }
+  idx = (k + TRACKS.length) % TRACKS.length;
+  v.src = DIR + TRACKS[idx];
+  renderList();
+  play();
+}
+
+function syncMute() {
+  mu.textContent = v.muted || v.volume === 0 ? '🔇' : '🔊';
+  vol.value = v.muted ? 0 : v.volume;
+}
+
+pp.onclick = function () { v.paused ? play() : v.pause(); };
+nx.onclick = function () { load(idx + 1); };
+v.onended = function () { load(idx + 1); };
+
+mu.onclick = function () {
+  v.muted = !v.muted;
+  if (!v.muted) { if (v.volume === 0) v.volume = 1; policyMuted = false; }
+  syncMute();
+};
+vol.oninput = function () {
+  v.volume = parseFloat(vol.value);
+  v.muted = v.volume === 0;
+  if (!v.muted) policyMuted = false;
+  mu.textContent = v.muted ? '🔇' : '🔊';
+};
+document.getElementById('pl').onclick = function () { list.classList.toggle('open'); };
+
+v.onplay  = function () { pp.textContent = '⏸'; };
+v.onpause = function () { pp.textContent = '▶'; };
+v.onloadedmetadata = function () { seek.value = 0; time.textContent = '0:00 / ' + fmt(v.duration); };
+v.ontimeupdate = function () {
+  if (!v.duration) return;
+  if (!seek.matches(':active')) seek.value = Math.round(v.currentTime / v.duration * 1000);
+  time.textContent = fmt(v.currentTime) + ' / ' + fmt(v.duration);
+};
+seek.oninput = function () { if (v.duration) v.currentTime = seek.value / 1000 * v.duration; };
+
+renderList();
+load(idx);
+</script>
+</body>
+</html>
